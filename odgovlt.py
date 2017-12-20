@@ -9,16 +9,22 @@ import json
 import logging
 import re
 import string
+import requests
+import urlparse
 
 import sqlalchemy as sa
 import unidecode
 
+import lxml
+from lxml import html
 from ckan import model
 from ckan.logic import NotFound
 from ckan.plugins import toolkit
 from ckanext.harvest.harvesters.base import HarvesterBase
 from ckanext.harvest.model import HarvestObject
 from pylons import config
+from cache import Cache
+
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +98,79 @@ def get_package_tags(r_zodziai):
             else:
                 name_list.append(name)
     return name_list
+
+
+def get_web(base_url):
+    cache = Cache()
+    cache_dict = {}
+    session = requests.Session()
+    session.headers.update({'User-Agent': 'Custom user agent'})
+    files_url = []
+    try:
+        page = session.get(base_url)
+        tree = html.fromstring(page.content)
+        type = page.headers.get('content-type')
+        page.close()
+    except requests.exceptions.InvalidSchema as e:
+        log.error(e)
+        return files_url
+    except lxml.etree.ParserError as e:
+        log.error(e)
+        return files_url
+    except requests.exceptions.ChunkedEncodingError as e:
+        log.error(e)
+        return files_url
+    except requests.exceptions.InvalidURL as e:
+        log.error(e)
+        return files_url
+    except requests.exceptions.MissingSchema as e:
+        log.error(e)
+        return files_url
+    except requests.exceptions.ConnectionError as e:
+        log.error(e)
+        return files_url
+    if type.startswith('text/html'):
+        path = tree.xpath('//@href')
+        substring = [
+          '.pdf', '.xml', '.doc', 'x-download']
+        not_allowed_substring = [
+          'mailto', 'aspx', 'javascript']
+        for node in path:
+            full_url = urlparse.urljoin(base_url, node)
+            if not cache.__contains__(full_url):
+                if full_url.find('/') and full_url.endswith(tuple(substring)) and not \
+                   any(x in full_url for x in not_allowed_substring):
+                    files_url.append(full_url)
+                    cache_dict['url'] = full_url
+                    cache_dict['cached_forever'] = False
+                else:
+                    try:
+                        file = session.get(full_url)
+                        type = file.headers.get('content-type')
+                        file.close()
+                    except requests.exceptions.InvalidSchema as e:
+                        log.error(e)
+                    except requests.exceptions.ChunkedEncodingError as e:
+                        log.error(e)
+                    except requests.exceptions.InvalidURL as e:
+                        log.error(e)
+                    except requests.exceptions.MissingSchema as e:
+                        log.error(e)
+                    except requests.exceptions.ConnectionError as e:
+                        log.error(e)
+                    try:
+                        cache_dict['url'] = full_url
+                        if any(x in type for x in substring) and not \
+                           any(x in full_url for x in not_allowed_substring):
+                            files_url.append(full_url)
+                            cache_dict['cached_forever'] = False
+                        else:
+                            cache_dict['cached_forever'] = True
+                    except TypeError as e:
+                        cache_dict['cached_forever'] = False
+                        log.error(e)
+                cache.update(cache_dict['url'], cache_dict['cached_forever'])
+    return files_url
 
 
 class CkanAPI(object):
